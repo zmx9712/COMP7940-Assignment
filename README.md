@@ -1,6 +1,6 @@
 # COMP7940-Assignment
 
-**Group members: 
+**Group members**: 
 
 Name  | ID  
  ---- | -----   
