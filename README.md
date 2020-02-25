@@ -2,7 +2,8 @@
 
 ## Group members:
 
-### Name  | ### ID  
+
+### Name  |  ID  
  ---- | -----  
  ZHANG Mingxuan  | 19430094 
  LI Yufan  | 19409354 
