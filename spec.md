@@ -25,4 +25,6 @@ This function will be performed through direct display or Q & A. After users que
 
 When users enter keywords, such as: new coronavirus message or Hong Kong outbreak. The chatbot will respond to the latest news. If we want to view relevant real-time news in detail, we can click the corresponding news window, and the chatbot will input the detailed information of the epidemic.
 
-  
+3.Function in showing the list of designated hospitals in provinces (cities and municipalities) in China mainland.
+
+When the user chooses this function, a list of all provinces and municipalities in China will be displayed. The user enters keywords according to the given list and will get a list of cities in the corresponding province. The user continues to enter the keywords that he wants to query the city, and will get the information on the designated hospitals for COVID-19 in the city.
