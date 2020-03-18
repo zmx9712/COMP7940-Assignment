@@ -23,7 +23,7 @@ This function will be performed through direct display or Q & A. After users que
 
 2.Function in news acquisition.
 
-When users enter keywords, such as: new coronavirus message. The chatbot will respond to the latest news. If we want to view relevant real-time news in detail, we can click the corresponding news window, and the chatbot will input the detailed information of the epidemic.
+When users enter keywords, such as: news. The chatbot will respond to the latest news. If we want to view relevant real-time news in detail, we can click the corresponding news window, and the chatbot will input the detailed information of the epidemic.
 
 3.Function in showing the list of designated hospitals in provinces (cities and municipalities) in China mainland.
 
