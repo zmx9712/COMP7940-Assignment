@@ -4,11 +4,21 @@ import os
 import sys
 import redis
 import requests
+import time
+try:
+    import xml.etree.cElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
 from argparse import ArgumentParser
 from bs4 import BeautifulSoup
+import http.client
+import hashlib
+import urllib
+import random
+import json
 from flask import Flask, request, abort
 from linebot import (LineBotApi, WebhookParser)
-from linebot.exceptions import (InvalidSignatureError)
+from linebot.exceptions import (InvalidSignatureError,LineBotApiError)
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
     TemplateSendMessage, ConfirmTemplate, MessageAction,
@@ -18,13 +28,11 @@ from linebot.models import (
     CarouselTemplate, CarouselColumn, PostbackEvent,
     StickerMessage, StickerSendMessage, LocationMessage, LocationSendMessage,
     ImageMessage, VideoMessage, AudioMessage, FileMessage,
-    UnfollowEvent, FollowEvent, JoinEvent, LeaveEvent, BeaconEvent,
-    MemberJoinedEvent, MemberLeftEvent,
     FlexSendMessage, BubbleContainer, ImageComponent, BoxComponent,
     TextComponent, SpacerComponent, IconComponent, ButtonComponent,
     SeparatorComponent, QuickReply, QuickReplyButton,
     ImageSendMessage,VideoSendMessage,PostbackTemplateAction,
-    MessageTemplateAction,URITemplateAction
+    MessageTemplateAction
 )
 
 from linebot.utils import PY3
@@ -60,8 +68,80 @@ parser = WebhookParser(channel_secret)
 
 # news source url
 news_url = r'https://www.foxnews.com/category/health/infectious-disease/coronavirus'
+# parse xml
+tree = ET.ElementTree(file='citylist.xml')
+root=tree.getroot()
+# baidu translate api
+appid = '20200325000404841'
+secretKey = 'eOODHG9LnG1nynL0Yd_f'
+httpClient = None
+initurl = '/api/trans/vip/translate'
 
+fromLang = 'auto'   #原文语种
+toLang = 'en'   #译文语种
+salt = random.randint(32768, 65536)
+lang_lib={'zh':'简体中文','en':'英语','jp':'日语','kor':'韩语','fra':'法语','spa':'西班牙语','th':'泰语','ara':'阿拉伯语','ru':'俄语','pt':'葡萄牙语','de':'德语',
+          'it':'意大利语','el':'希腊语','nl':'荷兰语','cht':'繁体中文'}
 
+#translate common words
+#created By GAO Han
+def langTrans(q):
+    sign = appid + q + str(salt) + secretKey
+    sign = hashlib.md5(sign.encode()).hexdigest()
+    myurl = initurl + '?appid=' + appid + '&q=' + urllib.parse.quote(q) + '&from=' + fromLang + '&to=' + toLang + '&salt=' + str(
+    salt) + '&sign=' + sign
+    transList=''
+    try:
+        httpClient = http.client.HTTPConnection('api.fanyi.baidu.com')
+        httpClient.request('GET', myurl)
+
+        # response是HTTPResponse对象
+        response = httpClient.getresponse()
+        result_all = response.read().decode("utf-8")
+        result = json.loads(result_all)
+        trans_result=result['trans_result']
+        for item in trans_result:
+            transList+=item['dst']
+        return transList
+    except Exception as e:
+        print (e)
+    finally:
+        if httpClient:
+            httpClient.close()
+
+# province list generate
+#by GAO Han
+def prov_ListArray():
+    if(toLang=='en'):
+        Top_text='Select from provinces below'
+    else:
+        Top_text=langTrans('Select from provinces below')
+    default_action={'type':'postback','label':"default_label",'data':"default_data"}
+    default_content={'type':'button',"style":"primary","height":"sm","margin":"xs"}
+    prov_cont_array=[{"type": "text","text": Top_text}]
+    if(toLang=='zh'):
+        for item in root:
+            name=item.get('provname')
+            prov_item='prov_'+name
+            default_action['label']=name
+            default_action['data']=prov_item
+            default_content['action']=default_action
+            content_str=str(default_content)
+            dict_temp=eval(content_str)
+            prov_cont_array.append(dict_temp)
+    else:
+        for item in root:
+            name=langTrans(item.get('provname')).capitalize()
+            prov_item='prov_'+item.get('provname')
+            default_action['label']=name
+            default_action['data']=prov_item
+            default_content['action']=default_action
+            content_str=str(default_content)
+            dict_temp=eval(content_str)
+            prov_cont_array.append(dict_temp)
+    return prov_cont_array
+
+con=prov_ListArray()
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -79,32 +159,94 @@ def callback():
     # if event is MessageEvent and message is TextMessage, then echo text
     for event in events:
         if not isinstance(event, MessageEvent):
-            continue
-        if isinstance(event.message, TextMessage):
-            # todo: 针对不同的文本输入进行不同的反应
-            if(isinstance(event.message,TextMessage) and event.message.text.lower()=='hospitals'):
-                handler_function3(event)
+            #display city list
+            if(isinstance(event,PostbackEvent) and event.postback.data[0:5]=='prov_'):
+                handle_CityList(event)
+            #display hospital list
+            elif(isinstance(event,PostbackEvent) and event.postback.data[0:5]=='city_'):
+                handle_HospiList(event)
+            #language switch
+            elif(isinstance(event,PostbackEvent) and event.postback.data[0:7]=='langTo_'):
+                curr_tolang=toLang
+                lang_Switch(event)
+                new_tolang=toLang
+                if(curr_tolang!=new_tolang):
+                    global con
+                    #upgrade province list
+                    con=prov_ListArray()
             else:
-                handle_TextMessage(event)
-        if isinstance(event.message, ImageMessage):
-            handle_ImageMessage(event)
-        if isinstance(event.message, VideoMessage):
-            handle_VideoMessage(event)
-        if isinstance(event.message, FileMessage):
-            handle_FileMessage(event)
-        if isinstance(event.message, StickerMessage):
-            handle_StickerMessage(event)
-        if(isinstance(event,PostbackEvent) and event.postback.data[0:5]=='prov_'):
-            handler_CityList(event)
+                continue
+        else:
+            if isinstance(event.message, TextMessage):
+                # todo: 针对不同的文本输入进行不同的反应
+                if(event.message.text.lower() in langTrans('hospitals')):
+                    #display province list
+                    handler_function3(event)
+                if(event.message.text.lower() in langTrans('language')):
+                    #display language list
+                    lang_Choose(event)
+                if(event.message.text.lower() in langTrans('news')):
+                    #display virus news
+                    handle_TextMessage(event)
+                else:
+                    #Q&A
+                    QAEvent(event)
 
-        if not isinstance(event, MessageEvent):
-            continue
-        if not isinstance(event.message, TextMessage):
-            continue
+            if isinstance(event.message, LocationMessage):
+                handle_LocationMessage(event)
+            if isinstance(event.message, ImageMessage) or isinstance(event.message, VideoMessage) or isinstance(event.message, FileMessage) or isinstance(event.message, StickerMessage):
+                #guidance
+                handle_OtherMessage(event)
 
     return 'OK'
 
+#by GAO Han -- generate language template
+def langArray(dict):
+    Top_text=langTrans('Select from languages below')
+    lang_array=[{"type": "text","text": Top_text}]
+    default_action={'type':'postback','label':"default_label",'data':"default_data"}
+    default_content={'type':'button',"style":"link","height":"sm","margin":"xs"}
+    for item in dict:
+        if(toLang!='zh'):
+            label_show=langTrans(dict[item])
+        else:
+            label_show=dict[item]
+        langTo='langTo_'+item
+        default_action['label']=label_show
+        default_action['data']=langTo
+        default_content['action']=default_action
+        content_str=str(default_content)
+        dict_temp=eval(content_str)
+        lang_array.append(dict_temp)
+    return lang_array
 
+#by GAO Han -- provide user language choose message
+def lang_Choose(event):
+    array=langArray(lang_lib)
+    line_bot_api.reply_message(
+        event.reply_token,
+        FlexSendMessage(
+            alt_text="list",
+            contents={
+                "type": "bubble",
+                "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents":array
+                }
+            }
+        )
+    )
+
+#by GAO Han -- language switch function
+def lang_Switch(event):
+    global toLang
+    toLang=event.postback.data[7:]
+    prompt=langTrans('修改成功！您当前使用的语言为'+lang_lib[toLang])
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=prompt)
+    )
 # todo: 当缓存的新闻数据不是最新的时候，获取最新的新闻数据，反之则直接返回缓存的新闻数据
 # createby: LI Yufan
 def get_hotNews():
@@ -134,7 +276,7 @@ def crawl_hotNews():
 
     # 获取html 界面
     webPage = requests.get(news_url)
-    bs = BeautifulSoup(webPage.text, 'lxml')
+    bs = BeautifulSoup(webPage.text, 'html.parser')
 
     news_layout = bs.find('div',{'class':'article-list'})
     news_list = news_layout.find_all('article', {'class': 'article'})
@@ -166,113 +308,183 @@ def crawl_hotNews():
 # Handler function for Text Message
 def handle_TextMessage(event):
     # createby: LI Yufan
-    if 'news' == event.message.text.lower():
-        # 调用获取最新新闻的接口获取新闻
-        hot_news = get_hotNews()
-        message = TemplateSendMessage(
-            alt_text='Hot news about the coronavirus',
-            template=CarouselTemplate(
-                columns=[
-                    CarouselColumn(
-                        thumbnail_image_url=str(hot_news[1][0],encoding='utf-8'),
-                        title=str(hot_news[2][0],encoding='utf-8'),
-                        text=str(hot_news[3][0],encoding='utf-8'),
-                        actions=[
-                            URIAction(uri=str(hot_news[0][0],encoding='utf-8'), label='View Detail')
-                        ]
-                    ),
-                    CarouselColumn(
-                        thumbnail_image_url=str(hot_news[1][1],encoding='utf-8'),
-                        title=str(hot_news[2][1], encoding='utf-8'),
-                        text=str(hot_news[3][1], encoding='utf-8'),
-                        actions=[
-                            URIAction(uri=str(hot_news[0][1], encoding='utf-8'), label='View Detail')
-                        ]
-                    ),
-                    CarouselColumn(
-                        thumbnail_image_url=str(hot_news[1][1], encoding='utf-8'),
-                        title=str(hot_news[2][2], encoding='utf-8'),
-                        text=str(hot_news[3][2], encoding='utf-8'),
-                        actions=[
-                            URIAction(uri=str(hot_news[0][2], encoding='utf-8'), label='View Detail')
-                        ]
-                    ),
-                    CarouselColumn(
-                        thumbnail_image_url=str(hot_news[1][3], encoding='utf-8'),
-                        title=str(hot_news[2][3], encoding='utf-8'),
-                        text=str(hot_news[3][3], encoding='utf-8'),
-                        actions=[
-                            URIAction(uri=str(hot_news[0][3], encoding='utf-8'), label='View Detail')
-                        ]
-                    ),
-                    CarouselColumn(
-                        thumbnail_image_url=str(hot_news[1][4], encoding='utf-8'),
-                        title=str(hot_news[2][4], encoding='utf-8'),
-                        text=str(hot_news[3][4], encoding='utf-8'),
-                        actions=[
-                            URIAction(uri=str(hot_news[0][4], encoding='utf-8'), label='View Detail')
-                        ]
-                    )
-                ]
-            )
+    # 调用获取最新新闻的接口获取新闻
+    hot_news = get_hotNews()
+    label1=langTrans('View Detail')
+    message = TemplateSendMessage(
+        alt_text='Hot news about the coronavirus',
+        template=CarouselTemplate(
+            columns=[
+                CarouselColumn(
+                    thumbnail_image_url=str(hot_news[1][0],encoding='utf-8'),
+                    title=str(hot_news[2][0],encoding='utf-8'),
+                    text=str(hot_news[3][0],encoding='utf-8'),
+                    actions=[
+                        URIAction(uri=str(hot_news[0][0],encoding='utf-8'), label=label1)
+                    ]
+                ),
+                CarouselColumn(
+                    thumbnail_image_url=str(hot_news[1][1],encoding='utf-8'),
+                    title=str(hot_news[2][1], encoding='utf-8'),
+                    text=str(hot_news[3][1], encoding='utf-8'),
+                    actions=[
+                        URIAction(uri=str(hot_news[0][1], encoding='utf-8'), label=label1)
+                    ]
+                ),
+                CarouselColumn(
+                    thumbnail_image_url=str(hot_news[1][2], encoding='utf-8'),
+                    title=str(hot_news[2][2], encoding='utf-8'),
+                    text=str(hot_news[3][2], encoding='utf-8'),
+                    actions=[
+                        URIAction(uri=str(hot_news[0][2], encoding='utf-8'), label=label1)
+                    ]
+                ),
+                CarouselColumn(
+                    thumbnail_image_url=str(hot_news[1][3], encoding='utf-8'),
+                    title=str(hot_news[2][3], encoding='utf-8'),
+                    text=str(hot_news[3][3], encoding='utf-8'),
+                    actions=[
+                        URIAction(uri=str(hot_news[0][3], encoding='utf-8'), label=label1)
+                    ]
+                ),
+                CarouselColumn(
+                    thumbnail_image_url=str(hot_news[1][4], encoding='utf-8'),
+                    title=str(hot_news[2][4], encoding='utf-8'),
+                    text=str(hot_news[3][4], encoding='utf-8'),
+                    actions=[
+                        URIAction(uri=str(hot_news[0][4], encoding='utf-8'), label=label1)
+                    ]
+                )
+            ]
         )
-        line_bot_api.reply_message(
-            event.reply_token,
-            message
-        )
+    )
+    line_bot_api.reply_message(
+        event.reply_token,
+        message
+    )
+
+
+#by GAO Han -- language switch for Q&A part
+def langVerseTrans(q):
+    sign = appid + q + str(salt) + secretKey
+    sign = hashlib.md5(sign.encode()).hexdigest()
+    myurl = initurl + '?appid=' + appid + '&q=' + urllib.parse.quote(q) + '&from=' + toLang + '&to=en' + '&salt=' + str(
+    salt) + '&sign=' + sign
+    transList=''
+    try:
+        httpClient = http.client.HTTPConnection('api.fanyi.baidu.com')
+        httpClient.request('GET', myurl)
+
+        # response是HTTPResponse对象
+        response = httpClient.getresponse()
+        result_all = response.read().decode("utf-8")
+        result = json.loads(result_all)
+        trans_result=result['trans_result']
+        for item in trans_result:
+            transList+=item['dst']
+        return transList
+    except Exception as e:
+        print (e)
+    finally:
+        if httpClient:
+            httpClient.close()
+
+def QAEvent(event):
     # createby: Zhang Mingxuan
-    else:
-        str_prevent_virus = "abcABC*?//"
+    if toLang=='en':
         if event.message.text == 'Q&A':
-            msg = 'OK! '
+            msg = 'You can ask quesiton like below:\nHow to do prevention?\nWhat should do outside?\nWhat to do if I have fever?\nCan I go to restaurant or bar?\nCan I go to park or mall?\nWhat should I do when I go back home?'\
+            '\nWhat should I if I am out?\nI want to travel\nI want to have a trip\nI feel boring\nI am going mad\nI want to play or learn something\n'
         elif 'how' in event.message.text.lower() or 'prevention' in event.message.text.lower():
-            # elif event.message.text == 'How to prevent the coronary pneumonia?':
             msg = 'Wash hands '
         elif 'what' in event.message.text.lower() or 'outside' in event.message.text.lower():
-            # elif event.message.text == 'What should you do during an outbreak?':
             msg = 'Wearing a mask '
-        # modifiedBy LI Yufan
+        elif 'have' in event.message.text.lower() or 'fever' in event.message.text.lower():
+            msg = 'You should go to the hospital'
+        elif 'restaurant' in event.message.text.lower() or 'bar' in event.message.text.lower():
+            msg = 'NO! You should eat or drink at home! '
+        elif 'park' in event.message.text.lower() or 'mall' in event.message.text.lower():
+            msg = 'No! I said you should stay at home! '
+        elif 'back' in event.message.text.lower() or 'home' in event.message.text.lower():
+            msg = 'Remember to disinfect! '
+        elif 'out' in event.message.text.lower():
+            msg = 'Disinfect with alcohol-based hand rub! '
+        elif 'travel' in event.message.text.lower() or 'trip' in event.message.text.lower():
+            msg = 'How many times do I have to tell you not to go out! '
+        elif 'boring' in event.message.text.lower() or 'mad' in event.message.text.lower():
+            msg = 'You can take this opportunity to lose weight~ '
+        elif 'play' in event.message.text.lower() or 'learn' in event.message.text.lower():
+            msg = 'You can play games or learn how to cook. '
         else:
-            msg = 'Sorry, for technical reasons, we cannot further provide u other kind of service! Please enter the ' \
-                  'command as follow \n \'news\' \t view the latest news of coronavirus topic' \
-                  '\n \'Q&A\' \t start Q&A and get answer if we have made it' \
-                  '\n \'Q&A\' \t start Q&A and get answer if we have made it' \
-                  '\n \'hospitals\' \t view the list of designated hospitals'
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(msg)
-        )
-#data/variable initiated by GAO Han
-#province list
-init_data=[
-    "Anhui","Beijing","Chongqing","Fujian","Gansu","Guangdong","Guangxi","Guizhou","Hainan","Hebei","Henan","Heilongjiang",
-    "Hubei","Hunan","Nei Mongolia","Jilin","Jiangsu","Jiangxi","Ningxia","Qinghai","Shandong","Shanxi","Shaanxi",
-    "Shanghai","Sichuan","Tianjin","Tibet","Xinjiang","Yunnan","Zhejiang"
-]
-#province content array
-prov_cont_array=[]
-#data init end
+            msg = 'Sorry, for technical reasons, the service you requested is temporarily unavailable!\nPlease enter the ' \
+                  'command as follow\n \'news\':view the latest news of coronavirus topic.' \
+                  '\n \'Q&A\':start Q&A and get corresponding answers.' \
+                  '\n \'hospital\':view the list of designated hospitals(Mainland China only).'\
+                  '\n \'language\':change current language.'
+    else:
+        userMsg=langVerseTrans(event.message.text)
+        if event.message.text == langTrans('Q&A'):
+            msg = 'You can ask quesitons like:\nHow to do prevention?\nWhat should I do outside?\nWhat to do if I have fever?\nCan I go to restaurant or bar?\nCan I go to park or mall?\nWhat should I do when I go back home?'\
+            '\nWhat should I do if I am out?\nI want to have a trip.\nI feel bored.\nI feel like I am going mad.\nI want to play or learn something.\n'
+        elif 'how' in userMsg or 'prevention' in userMsg or 'prevent' in userMsg:
+            msg = 'Wash hands'
+        elif 'what' in userMsg or 'outside' in userMsg:
+            msg = 'Wearing a mask'
+        elif 'have' in userMsg or 'fever' in userMsg:
+            msg = 'You should go to the hospital'
+        elif 'restaurant' in userMsg or 'bar' in userMsg:
+            msg = 'NO! You should eat or drink at home! '
+        elif 'park' in userMsg or 'mall' in userMsg:
+            msg = 'No! I said you should stay at home! '
+        elif 'back' in userMsg or 'home' in userMsg:
+            msg = 'Remember to disinfect! '
+        elif 'out' in userMsg:
+            msg = 'Disinfect with alcohol-based hand rub! '
+        elif 'travel' in userMsg or 'trip' in userMsg:
+            msg = 'How many times do I have to tell you not to go out! '
+        elif 'boring' in userMsg or 'mad' in userMsg or 'crazy' in userMsg or 'bored' in userMsg:
+            msg = 'You can take this opportunity to lose weight~ '
+        elif 'play' in userMsg or 'learn' in userMsg:
+            msg = 'You can play games or learn how to cook. '
+        else:
+            msg = 'Sorry, for technical reasons, the service you requested is temporarily unavailable!\nPlease enter the ' \
+                  'command as follow\n \'news\' \tview the latest news of coronavirus topic.' \
+                  '\n \'Q&A\' \tstart Q&A and get corresponding answers.' \
+                  '\n \'hospital\' \t view the list of designated hospitals.(Mainland China only)'\
+                  '\n \'language\' \t change current language.'\
+                  '\n or send your location to get the distance to the nearest hospital and the time it takes to get there.'
+        msg=langTrans(msg)
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(msg)
+    )
 
-#Generate province content array
-#by GAO Han
-def prov_ListArray(arr):
+#by GAO Han -- generate city list based on given province
+def city_ListArray(word,arr):
+    if(toLang=='en'):
+        Top_text='Select from cities below'
+    else:
+        Top_text=langTrans('Select from cities below')
+    city_array=[{"type": "text","text": Top_text}]
     default_action={'type':'postback','label':"default_label",'data':"default_data"}
     default_content={'type':'button',"style":"secondary","height":"sm","margin":"xs"}
     for item in arr:
-        prov_item='prov_'+item
-        default_action['label']=item
-        default_action['data']=prov_item
+        city_data='city_'+item.get('cityname')+'OF'+word
+        if(toLang=='zh'):
+            default_action['label']= item.get('cityname')
+        else:
+            default_action['label']= langTrans(item.get('cityname')).capitalize()
+        default_action['data']=city_data
         default_content['action']=default_action
         content_str=str(default_content)
         dict_temp=eval(content_str)
-        prov_cont_array.append(dict_temp)
-    return prov_cont_array
+        city_array.append(dict_temp)
+    return city_array
 
 #Handle function3--display info about designated hospitals
-#step1--display all the provinces/municipality
-#by GAO Han
+#by GAO Han -- display all the provinces/municipality
 def handler_function3(event):
-    con=prov_ListArray(init_data)
+    global con
     line_bot_api.reply_message(
         event.reply_token,
         FlexSendMessage(
@@ -288,42 +500,143 @@ def handler_function3(event):
         )
     )
 
-#display city list
-#by GAO Han
-def handler_CityList(event):
+#by GAO Han -- send city choose message to the user
+def handle_CityList(event):
+    for province in root:
+        if (event.postback.data[5:].lower()==province.get('provname')):
+            citylist=city_ListArray(province.get('provname'),province)
+            break
+        else:
+            continue
+    time.sleep(0.5)
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage("Please choose cities in "+event.postback.data[5:])
+        FlexSendMessage(
+            alt_text="list",
+            contents={
+                "type": "bubble",
+                "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents":citylist
+                }
+            }
+        )
     )
 
-# Handler function for Sticker Message
-def handle_StickerMessage(event):
+#by GAO Han -- language tranform for hospital display part
+def langTransform(q):
+    sign = appid + q + str(salt) + secretKey
+    sign = hashlib.md5(sign.encode()).hexdigest()
+    myurl = initurl + '?appid=' + appid + '&q=' + urllib.parse.quote(q) + '&from=' + fromLang + '&to=' + toLang + '&salt=' + str(
+    salt) + '&sign=' + sign
+    transList=''
+    try:
+        httpClient = http.client.HTTPConnection('api.fanyi.baidu.com')
+        httpClient.request('GET', myurl)
+
+        # response是HTTPResponse对象
+        response = httpClient.getresponse()
+        result_all = response.read().decode("utf-8")
+        result = json.loads(result_all)
+        trans_result=result['trans_result']
+        i=1
+        for item in trans_result:
+            transList+=str(i)+'. '+item['dst']+'\n'
+            i+=1
+        return transList
+    except Exception as e:
+        print (e)
+    finally:
+        if httpClient:
+            httpClient.close()
+
+#by GAO Han -- get hospital name based on given city and send to the user
+def handle_HospiList(event):
+    index=event.postback.data.find('OF')
+    prov_str=event.postback.data[index+2:]
+    hospitalList='';
+    for province in root:
+        if(province.get('provname')==prov_str):
+            for city in province:
+                if(city.get('cityname')==event.postback.data[5:index]):
+                    for hospital in city:
+                       hospitalList+=hospital.text+"\n"
+                    if(toLang!='zh'):
+                        hospitalList=langTransform(hospitalList)
+                        str_list = list(hospitalList)
+                        headStr=city.get('cityname')+'的定点医院名单'
+                        insertStr=langTrans(headStr)
+                        str_list.insert(0,insertStr+'\n')
+                        hospitalList = ''.join(str_list)
+                    else:
+                        str_list=list(hospitalList)
+                        str_list.insert(0,city.get('cityname')+'的定点医院有：\n')
+                        hospitalList=''.join(str_list)
+                    break
+                else:
+                    continue
+            break
+        else:
+            continue
+    time.sleep(0.5)
     line_bot_api.reply_message(
         event.reply_token,
-        StickerSendMessage(
-            package_id=event.message.package_id,
-            sticker_id=event.message.sticker_id)
+        TextSendMessage(hospitalList)
     )
 
+#by ZHANG Mingxuan -- Google Map
+def handle_LocationMessage(event):
+    latdata = event.message.latitude
+    latdata = str(latdata)
+    lngdata = event.message.longitude
+    lngdata = str(lngdata)
+    '''
+    destination_url = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=Hospital&inputtype=textquery&fields=photos,formatted_address,name,rating,opening_hours,geometry&key=AIzaSyDjCjU2ntyjID5hgfFChltHAzI1y_9f96M"
+    location_json = requests.get(destination_url)
+    json_destination_formatted = json.loads(location_json.text)
+    
+    name = str(json_destination_formatted[u'candidates'][0][u'name'])
+    destinaton_lat = str(json_destination_formatted[u'candidates'][0][u'geometry'][u'location'][u'lat'])
+    destinaton_lng = str(json_destination_formatted[u'candidates'][0][u'geometry'][u'location'][u'lng'])
+    '''
+    hospital_location = "22.309060, 114.174662"
+    key = "AIzaSyDjCjU2ntyjID5hgfFChltHAzI1y_9f96M"
+    #requests_url = "https://maps.googleapis.com/maps/api/distancematrix/json?units=imperial&origins="+latdata+","+lngdata+"&destinations="+destinaton_lat+","+destinaton_lng+"&key=" + key
+    requests_url = "https://maps.googleapis.com/maps/api/distancematrix/json?units=imperial&origins="+latdata+","+lngdata+"&destinations="+hospital_location+"&key=" + key
+    distance_json = requests.get(requests_url)
+    json_formatted = json.loads(distance_json.text)
+    if(json_formatted[u'rows'][0][u'elements'][0][u'status']=='ZERO_RESULTS'):
+        msg="Sorry,we cannot retrieve any results.Please try other locations."
+    else:
+        duration = json_formatted[u'rows'][0][u'elements'][0][u'duration'][u'text']
+        distance = json_formatted[u'rows'][0][u'elements'][0][u'distance'][u'text']
+        #route_infor = "The hospital is "+ name +". "+ "You are "+ distance + " away from your destination. It takes about " + duration + " to arrive there."
+        route_infor = "You are "+ distance + " away from your destination. It takes about " + duration + " to arrive there."
 
-# Handler function for Image Message
-def handle_ImageMessage(event):
+        if(toLang=='en'):
+            msg = str(route_infor)
+        else:
+            msg = langTrans(str(route_infor))
+    if(toLang!='en'):
+        msg = langTrans(msg)
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text="Nice image!")
+        TextSendMessage(msg)
     )
-
-
-# Handler function for Video Message
-def handle_VideoMessage(event):
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="Nice video!"))
-
-
-# Handler function for File Message
-def handle_FileMessage(event):
+# Handle function for guidance
+def handle_OtherMessage(event):
+    msg = 'Sorry, for technical reasons, the service you requested is temporarily unavailable!\nPlease enter the ' \
+                  'command as follow\n \'news\' \tview the latest news of coronavirus topic' \
+                  '\n \'Q&A\' \tstart Q&A and get corresponding answers' \
+                  '\n \'hospital\' \t view the list of designated hospitals(Mainland China only)'\
+                  '\n \'language\' \t change current language'\
+                  '\n or send your location to get the distance to the nearest hospital and the time it takes to get there.'
+    if(toLang!='en'):
+        msg=langTrans(msg)
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text="Nice file!")
+        TextSendMessage(msg)
     )
 
 
@@ -335,5 +648,3 @@ if __name__ == "__main__":
     options = arg_parser.parse_args()
 
     app.run(host='0.0.0.0', debug=options.debug, port=heroku_port)
-
-
