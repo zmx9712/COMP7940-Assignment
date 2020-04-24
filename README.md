@@ -1,4 +1,4 @@
-# COMP7940-Assignment
+# COMP7940-Project
 
 **Group members**: 
 
